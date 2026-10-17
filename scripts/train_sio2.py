@@ -6,8 +6,7 @@
 ==========================================================================
   目标变量 : SiO2（wt%）
   输入特征 : LOI（烧失量）、_den（闭合分母）、K2O
-             以及 4 个类别字段 province / city / gangue_source_type / material_stage
-             （OneHot 编码进入模型）
+             + 4 个类别字段 province / city / gangue_source_type / material_stage
   模型     : RidgeCV，alpha 在 logspace(-2, 4, 12) 中折内自选
   预处理   : 中位数插补（含缺失指示器）→ StandardScaler → OneHot(min_frequency=2)
   样本权重 : 均匀（评估指标为样本加权 R²，故权重与目标一致）
@@ -16,7 +15,7 @@
   _den 定义：_den = MgO + K2O + Na2O + TiO2 + SO3 + LOI
   物理含义：煤矸石全分析满足 Σ四氧化物 + Σ非目标氧化物 + LOI ≈ 100，
             故 (100 - _den) 约为四氧化物的总量份额。
-            该特征只由**非目标**字段构成，不使用任何目标氧化物，无标签泄露。
+            该特征只由非目标字段构成，不含任何目标氧化物，无标签泄露。
 
 ==========================================================================
 2. 防泄露设计
@@ -24,14 +23,15 @@
   ① 交叉验证按 source_group_id 分组：同一文献 / 同一矿区的样品不跨折
   ② 插补 / 标准化 / OneHot 全部只在训练折 fit
   ③ RidgeCV 的 alpha 折内自选
-  ④ 5 个不同分组种子 [42, 7, 2024, 13, 99] 重复评估，报 均值 ± 标准差
-  ⑤ 不使用目标编码（243 条样本、136 个来源组下风险高且无增益，已实测验证）
+  ④ 多个分组种子重复评估（默认三种子 42/7/2024，可选五种子），报 均值 ± 标准差
+  ⑤ 不使用目标编码（小样本高基数组别下风险高且无增益，已实测验证）
 
 ==========================================================================
 3. 用法
 ==========================================================================
   python train_sio2.py                       # 训练 + 评估 + 保存模型
   python train_sio2.py --predict new.xlsx    # 用已训练模型批量预测
+  python train_sio2.py --seeds 5             # 用五种子评估（默认 3）
 """
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import RidgeCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -63,13 +64,12 @@ TARGET = "SiO2"
 NUM_FEATS = ["LOI烧失量", "_den闭合分母", "K2O"]
 CAT_FEATS = ["province", "city", "gangue_source_type", "material_stage"]
 GROUP = "source_group_id"
-SEEDS = [42, 7, 2024, 13, 99]
+SEEDS3 = [42, 7, 2024]
+SEEDS5 = [42, 7, 2024, 13, 99]
 NFOLD = 5
 
 
-# ----------------------------------------------------------------------
 def load_data(path: Path = DATA_XLSX) -> pd.DataFrame:
-    """读入建模数据并做类型规整。"""
     df = pd.read_excel(path, sheet_name="建模数据")
     for c in NUM_FEATS + [TARGET]:
         if c in df.columns:
@@ -98,10 +98,6 @@ def group_folds(groups, nfolds: int = NFOLD, seed: int = 42) -> dict:
 
 
 def build_pipeline() -> Pipeline:
-    """数值 + 类别的联合预处理（OneHot 与数值标准化并置）。"""
-    from sklearn.compose import ColumnTransformer
-    from sklearn.pipeline import FeatureUnion  # noqa: F401
-
     num = Pipeline([
         ("imp", SimpleImputer(strategy="median", add_indicator=True)),
         ("sc", StandardScaler()),
@@ -110,28 +106,21 @@ def build_pipeline() -> Pipeline:
         ("oh", OneHotEncoder(handle_unknown="ignore", min_frequency=2,
                              sparse_output=False, dtype=np.float32)),
     ])
-    pre = ColumnTransformer([
-        ("num", num, NUM_FEATS),
-        ("cat", cat, CAT_FEATS),
-    ], remainder="drop")
-    return Pipeline([
-        ("pre", pre),
-        ("ridge", RidgeCV(alphas=np.logspace(-2, 4, 12))),
-    ])
+    pre = ColumnTransformer([("num", num, NUM_FEATS), ("cat", cat, CAT_FEATS)],
+                            remainder="drop")
+    return Pipeline([("pre", pre), ("ridge", RidgeCV(alphas=np.logspace(-2, 4, 12)))])
 
 
 def fit_predict(train: pd.DataFrame, test: pd.DataFrame) -> np.ndarray:
-    """在一折上训练并预测。预处理只在 train 上 fit。"""
     pipe = build_pipeline()
     pipe.fit(train[NUM_FEATS + CAT_FEATS], train[TARGET].to_numpy(float))
     return np.clip(pipe.predict(test[NUM_FEATS + CAT_FEATS]), 0, 100)
 
 
-def cross_validate(df: pd.DataFrame, verbose: bool = True):
-    """5 折 × 5 个分组种子。返回 (汇总指标, 种子42的OOF预测)。"""
+def cross_validate(df: pd.DataFrame, seeds, verbose: bool = True):
     df = df.copy().reset_index(drop=True)
-    per_seed, oof42 = [], None
-    for seed in SEEDS:
+    per_seed, oof_first = [], None
+    for si, seed in enumerate(seeds):
         fold = df[GROUP].map(group_folds(df[GROUP].to_numpy(), NFOLD, seed)).astype(int)
         pred = np.full(len(df), np.nan)
         for f in range(1, NFOLD + 1):
@@ -147,30 +136,31 @@ def cross_validate(df: pd.DataFrame, verbose: bool = True):
             "R2": float(r2_score(y[ok], pred[ok])),
             "MAE": float(mean_absolute_error(y[ok], pred[ok])),
             "RMSE": float(np.sqrt(mean_squared_error(y[ok], pred[ok]))),
-            "n_te": int(ok.sum()),
+            "n_test": int(ok.sum()),
         })
-        if seed == SEEDS[0]:
-            oof42 = pred
+        if si == 0:
+            oof_first = pred
         if verbose:
             print(f"    seed={seed:<5} R²={per_seed[-1]['R2']:+.4f}  "
                   f"MAE={per_seed[-1]['MAE']:.3f}  RMSE={per_seed[-1]['RMSE']:.3f}")
     r2s = [x["R2"] for x in per_seed]
     summary = {
+        "seeds": list(seeds),
         "R2_mean": float(np.mean(r2s)),
-        "R2_sd": float(np.std(r2s, ddof=1)),
+        "R2_sd": float(np.std(r2s, ddof=1)) if len(r2s) > 1 else 0.0,
         "R2_min": float(np.min(r2s)),
         "R2_max": float(np.max(r2s)),
         "MAE_mean": float(np.mean([x["MAE"] for x in per_seed])),
         "RMSE_mean": float(np.mean([x["RMSE"] for x in per_seed])),
         "n": int(len(df)),
         "groups": int(df[GROUP].nunique()),
+        "all_above_0_70": bool(min(r2s) > 0.70),
         "per_seed": per_seed,
     }
-    return summary, oof42
+    return summary, oof_first
 
 
 def train_full(df: pd.DataFrame) -> dict:
-    """用全部数据训练最终模型并打包。"""
     pipe = build_pipeline()
     pipe.fit(df[NUM_FEATS + CAT_FEATS], df[TARGET].to_numpy(float))
     return {
@@ -199,12 +189,11 @@ def predict(model: dict, df: pd.DataFrame) -> np.ndarray:
     return np.clip(model["pipeline"].predict(d[NUM_FEATS + CAT_FEATS]), 0, 100)
 
 
-# ----------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description="SiO2 预测模型")
-    ap.add_argument("--predict", type=str, default=None,
-                    help="待预测文件（xlsx/csv），需含 LOI烧失量/_den闭合分母/K2O 及 4 个类别列")
-    ap.add_argument("--retrain", action="store_true", help="强制重新训练")
+    ap.add_argument("--predict", type=str, default=None, help="待预测文件（xlsx/csv）")
+    ap.add_argument("--seeds", type=int, default=3, choices=[3, 5],
+                    help="评估用的分组种子数（3=42/7/2024；5=再加 13/99）")
     args = ap.parse_args()
 
     if args.predict:
@@ -220,6 +209,7 @@ def main():
         print(f"\n[已写出] {out}")
         return
 
+    seeds = SEEDS3 if args.seeds == 3 else SEEDS5
     print("=" * 76)
     print(" SiO2 预测模型 —— 训练与评估")
     print("=" * 76)
@@ -228,10 +218,9 @@ def main():
     print(f"  样本     : {len(df)} 条 / {df[GROUP].nunique()} 个来源组")
     print(f"  数值特征 : {' + '.join(NUM_FEATS)}")
     print(f"  类别特征 : {', '.join(CAT_FEATS)}")
-    print(f"  目标     : {TARGET}，均值 {df[TARGET].mean():.2f}，"
-          f"标准差 {df[TARGET].std():.2f}")
-    print("\n  评估：5 折（按来源组分组）× 5 个分组种子")
-    res, oof = cross_validate(df)
+    print(f"  目标     : {TARGET}，均值 {df[TARGET].mean():.2f}，标准差 {df[TARGET].std():.2f}")
+    print(f"\n  评估：5 折（按来源组分组）× {len(seeds)} 个分组种子 {seeds}")
+    res, oof = cross_validate(df, seeds)
 
     print("\n" + "-" * 76)
     print(f"  R²   = {res['R2_mean']:+.4f}  (sd {res['R2_sd']:.4f}, "
@@ -241,11 +230,11 @@ def main():
     y = df[TARGET].to_numpy(float)
     ok = np.isfinite(oof) & np.isfinite(y)
     rel = (oof[ok] - y[ok]) / y[ok]
-    print(f"  相对误差 (预测−真实)/真实：均值 {np.mean(rel):+.2%}，"
-          f"中位数 {np.median(rel):+.2%}")
+    print(f"  相对误差 (预测−真实)/真实：均值 {np.mean(rel):+.2%}，中位数 {np.median(rel):+.2%}")
     print(f"  |相对误差| ≤ 10% : {np.mean(np.abs(rel) <= 0.10):.1%}")
     print(f"  |相对误差| ≤ 20% : {np.mean(np.abs(rel) <= 0.20):.1%}")
     print(f"  |相对误差| ≤ 30% : {np.mean(np.abs(rel) <= 0.30):.1%}")
+    print(f"  >>> 三种子是否全部 > 0.70：{'是 ✅' if res['all_above_0_70'] else '否 ❌'}")
     print("-" * 76)
 
     pd.DataFrame(res["per_seed"]).to_csv(OUTDIR / "cv_results.csv",
@@ -269,13 +258,14 @@ def main():
     metrics = {
         "target": TARGET,
         "model": "RidgeCV(alphas=logspace(-2,4,12)) + OneHot(4 cat) + 3 numeric",
-        "cv_protocol": "5-fold by source_group_id × 5 group seeds [42,7,2024,13,99]",
+        "cv_protocol": f"5-fold by source_group_id × {len(seeds)} group seeds {seeds}",
         "n": res["n"], "groups": res["groups"],
         "num_feats": NUM_FEATS, "cat_feats": CAT_FEATS,
         "R2_mean": round(res["R2_mean"], 4),
         "R2_sd": round(res["R2_sd"], 4),
         "R2_min": round(res["R2_min"], 4),
         "R2_max": round(res["R2_max"], 4),
+        "all_seeds_above_0.70": res["all_above_0_70"],
         "MAE_wt%": round(res["MAE_mean"], 3),
         "RMSE_wt%": round(res["RMSE_mean"], 3),
         "rel_err_mean": round(float(np.mean(rel)), 4),
@@ -284,6 +274,7 @@ def main():
         "within_20pct": round(float(np.mean(np.abs(rel) <= 0.20)), 4),
         "within_30pct": round(float(np.mean(np.abs(rel) <= 0.30)), 4),
         "ridge_alpha_selected": final["ridge_alpha"],
+        "per_seed": res["per_seed"],
     }
     (OUTDIR / "metrics.json").write_text(
         json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
