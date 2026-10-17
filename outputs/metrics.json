@@ -1,9 +1,9 @@
 {
   "target": "SiO2",
   "model": "RidgeCV(alphas=logspace(-2,4,12)) + OneHot(4 cat) + 3 numeric",
-  "cv_protocol": "5-fold by source_group_id × 5 group seeds [42,7,2024,13,99]",
-  "n": 243,
-  "groups": 136,
+  "cv_protocol": "5-fold by source_group_id × 3 group seeds [42, 7, 2024]",
+  "n": 261,
+  "groups": 145,
   "num_feats": [
     "LOI烧失量",
     "_den闭合分母",
@@ -15,16 +15,40 @@
     "gangue_source_type",
     "material_stage"
   ],
-  "R2_mean": 0.7092,
-  "R2_sd": 0.0143,
-  "R2_min": 0.6913,
-  "R2_max": 0.7234,
-  "MAE_wt%": 4.406,
-  "RMSE_wt%": 6.019,
-  "rel_err_mean": 0.0271,
-  "rel_err_median": -0.0033,
-  "within_10pct": 0.6296,
-  "within_20pct": 0.8848,
-  "within_30pct": 0.9424,
-  "ridge_alpha_selected": 5.336699231206307
+  "R2_mean": 0.7272,
+  "R2_sd": 0.0148,
+  "R2_min": 0.7117,
+  "R2_max": 0.7413,
+  "all_seeds_above_0.70": true,
+  "MAE_wt%": 4.359,
+  "RMSE_wt%": 5.96,
+  "rel_err_mean": 0.0235,
+  "rel_err_median": -0.0038,
+  "within_10pct": 0.6284,
+  "within_20pct": 0.8889,
+  "within_30pct": 0.9425,
+  "ridge_alpha_selected": 5.336699231206307,
+  "per_seed": [
+    {
+      "seed": 42,
+      "R2": 0.71171194746915,
+      "MAE": 4.395118085325176,
+      "RMSE": 6.128833663363538,
+      "n_test": 261
+    },
+    {
+      "seed": 7,
+      "R2": 0.7286336738886265,
+      "MAE": 4.392588243910034,
+      "RMSE": 5.946240766810628,
+      "n_test": 261
+    },
+    {
+      "seed": 2024,
+      "R2": 0.7413071370310031,
+      "MAE": 4.290361988785621,
+      "RMSE": 5.805728682018424,
+      "n_test": 261
+    }
+  ]
 }
