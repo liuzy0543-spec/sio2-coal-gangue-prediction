@@ -1,0 +1,30 @@
+{
+  "target": "SiO2",
+  "model": "RidgeCV(alphas=logspace(-2,4,12)) + OneHot(4 cat) + 3 numeric",
+  "cv_protocol": "5-fold by source_group_id × 5 group seeds [42,7,2024,13,99]",
+  "n": 243,
+  "groups": 136,
+  "num_feats": [
+    "LOI烧失量",
+    "_den闭合分母",
+    "K2O"
+  ],
+  "cat_feats": [
+    "province",
+    "city",
+    "gangue_source_type",
+    "material_stage"
+  ],
+  "R2_mean": 0.7092,
+  "R2_sd": 0.0143,
+  "R2_min": 0.6913,
+  "R2_max": 0.7234,
+  "MAE_wt%": 4.406,
+  "RMSE_wt%": 6.019,
+  "rel_err_mean": 0.0271,
+  "rel_err_median": -0.0033,
+  "within_10pct": 0.6296,
+  "within_20pct": 0.8848,
+  "within_30pct": 0.9424,
+  "ridge_alpha_selected": 5.336699231206307
+}
